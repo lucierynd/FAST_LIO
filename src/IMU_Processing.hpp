@@ -20,6 +20,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
 #include "use-ikfom.hpp"
+//#include "preprocess.h"
 
 /// *************Preconfiguration
 
@@ -57,6 +58,7 @@ class ImuProcess
   V3D cov_bias_gyr;
   V3D cov_bias_acc;
   double first_lidar_time;
+  int    lidar_type;
 
  private:
   void IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N);
@@ -217,8 +219,15 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   v_imu.push_front(last_imu_);
   const double &imu_beg_time = rclcpp::Time(v_imu.front()->header.stamp).seconds();
   const double &imu_end_time = rclcpp::Time(v_imu.back()->header.stamp).seconds();
-  const double &pcl_beg_time = meas.lidar_beg_time;
-  const double &pcl_end_time = meas.lidar_end_time;
+  
+  double pcl_beg_time = meas.lidar_beg_time;
+  double pcl_end_time = meas.lidar_end_time;
+
+  if (lidar_type == 5) // CYGLIDAR
+  {
+    pcl_beg_time = last_lidar_end_time_;
+    pcl_end_time = meas.lidar_end_time;
+  }
   
   /*** sort point clouds by offset time ***/
   pcl_out = *(meas.lidar);
@@ -298,40 +307,43 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   last_imu_ = meas.imu.back();
   last_lidar_end_time_ = pcl_end_time;
 
-  /*** undistort each lidar point (backward propagation) ***/
-  if (pcl_out.points.begin() == pcl_out.points.end()) return;
-  auto it_pcl = pcl_out.points.end() - 1;
-  for (auto it_kp = IMUpose.end() - 1; it_kp != IMUpose.begin(); it_kp--)
+  if (lidar_type != 5) // CYGLIDAR
   {
-    auto head = it_kp - 1;
-    auto tail = it_kp;
-    R_imu<<MAT_FROM_ARRAY(head->rot);
-    // cout<<"head imu acc: "<<acc_imu.transpose()<<endl;
-    vel_imu<<VEC_FROM_ARRAY(head->vel);
-    pos_imu<<VEC_FROM_ARRAY(head->pos);
-    acc_imu<<VEC_FROM_ARRAY(tail->acc);
-    angvel_avr<<VEC_FROM_ARRAY(tail->gyr);
-
-    for(; it_pcl->curvature / double(1000) > head->offset_time; it_pcl --)
+    /*** undistort each lidar point (backward propagation) ***/
+    if (pcl_out.points.begin() == pcl_out.points.end()) return;
+    auto it_pcl = pcl_out.points.end() - 1;
+    for (auto it_kp = IMUpose.end() - 1; it_kp != IMUpose.begin(); it_kp--)
     {
-      dt = it_pcl->curvature / double(1000) - head->offset_time;
+      auto head = it_kp - 1;
+      auto tail = it_kp;
+      R_imu<<MAT_FROM_ARRAY(head->rot);
+      // cout<<"head imu acc: "<<acc_imu.transpose()<<endl;
+      vel_imu<<VEC_FROM_ARRAY(head->vel);
+      pos_imu<<VEC_FROM_ARRAY(head->pos);
+      acc_imu<<VEC_FROM_ARRAY(tail->acc);
+      angvel_avr<<VEC_FROM_ARRAY(tail->gyr);
 
-      /* Transform to the 'end' frame, using only the rotation
-       * Note: Compensation direction is INVERSE of Frame's moving direction
-       * So if we want to compensate a point at timestamp-i to the frame-e
-       * P_compensate = R_imu_e ^ T * (R_i * P_i + T_ei) where T_ei is represented in global frame */
-      M3D R_i(R_imu * Exp(angvel_avr, dt));
-      
-      V3D P_i(it_pcl->x, it_pcl->y, it_pcl->z);
-      V3D T_ei(pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos);
-      V3D P_compensate = imu_state.offset_R_L_I.conjugate() * (imu_state.rot.conjugate() * (R_i * (imu_state.offset_R_L_I * P_i + imu_state.offset_T_L_I) + T_ei) - imu_state.offset_T_L_I);// not accurate!
-      
-      // save Undistorted points and their rotation
-      it_pcl->x = P_compensate(0);
-      it_pcl->y = P_compensate(1);
-      it_pcl->z = P_compensate(2);
+      for(; it_pcl->curvature / double(1000) > head->offset_time; it_pcl --)
+      {
+        dt = it_pcl->curvature / double(1000) - head->offset_time;
 
-      if (it_pcl == pcl_out.points.begin()) break;
+        /* Transform to the 'end' frame, using only the rotation
+        * Note: Compensation direction is INVERSE of Frame's moving direction
+        * So if we want to compensate a point at timestamp-i to the frame-e
+        * P_compensate = R_imu_e ^ T * (R_i * P_i + T_ei) where T_ei is represented in global frame */
+        M3D R_i(R_imu * Exp(angvel_avr, dt));
+        
+        V3D P_i(it_pcl->x, it_pcl->y, it_pcl->z);
+        V3D T_ei(pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos);
+        V3D P_compensate = imu_state.offset_R_L_I.conjugate() * (imu_state.rot.conjugate() * (R_i * (imu_state.offset_R_L_I * P_i + imu_state.offset_T_L_I) + T_ei) - imu_state.offset_T_L_I);// not accurate!
+        
+        // save Undistorted points and their rotation
+        it_pcl->x = P_compensate(0);
+        it_pcl->y = P_compensate(1);
+        it_pcl->z = P_compensate(2);
+
+        if (it_pcl == pcl_out.points.begin()) break;
+      }
     }
   }
 }

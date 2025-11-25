@@ -588,6 +588,38 @@ void Preprocess::default_handler(const sensor_msgs::msg::PointCloud2::UniquePtr 
   }
 }
 
+void Preprocess::cyglidar_handler(const sensor_msgs::msg::PointCloud2::UniquePtr &msg) {
+    pl_surf.clear();
+    pl_corn.clear();
+    pl_full.clear();
+    pcl::PointCloud<pcl::PointXYZRGB> pl_orig;
+    pcl::fromROSMsg(*msg, pl_orig);
+    int plsize = pl_orig.points.size();
+    pl_corn.reserve(plsize);
+    pl_surf.reserve(plsize);
+
+    for (uint i = 0; i < plsize; i++) {
+
+        if (i % point_filter_num != 0) continue;
+
+        double range = pl_orig.points[i].x * pl_orig.points[i].x + pl_orig.points[i].y * pl_orig.points[i].y +
+                       pl_orig.points[i].z * pl_orig.points[i].z;
+
+        if (range < blind * blind) continue;
+
+        Eigen::Vector3d pt_vec;
+        PointType added_pt;
+        added_pt.x = pl_orig.points[i].x;
+        added_pt.y = pl_orig.points[i].y;
+        added_pt.z = pl_orig.points[i].z;
+        added_pt.normal_x = pl_orig.points[i].r;
+        added_pt.normal_y = pl_orig.points[i].g;
+        added_pt.normal_z = pl_orig.points[i].b;
+        added_pt.curvature = 0.0;
+        pl_surf.points.push_back(added_pt);
+    }
+}
+
 void Preprocess::give_feature(pcl::PointCloud<PointType>& pl, vector<orgtype>& types)
 {
   int plsize = pl.size();
